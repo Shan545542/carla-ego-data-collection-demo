@@ -11,6 +11,10 @@ Front RGB camera:
 
 ![Sample RGB camera frame](assets/sample_rgb.png)
 
+Semantic segmentation camera:
+
+![Sample semantic segmentation frame](assets/sample_semantic.png)
+
 Trajectory plot:
 
 ![Sample trajectory plot](assets/sample_trajectory.png)
@@ -20,8 +24,10 @@ Trajectory plot:
 - Connect to a CARLA server from Python.
 - Spawn one ego vehicle.
 - Attach a front RGB camera to the ego vehicle.
+- Optionally attach a semantic segmentation camera to the same pose.
 - Run CARLA in synchronous mode.
 - Save RGB frames to disk.
+- Save semantic segmentation frames with the CityScapes color palette.
 - Save ego vehicle pose, velocity, and control states to CSV.
 - Generate a trajectory plot after each run.
 - Restore world settings and clean up actors after the script exits.
@@ -42,6 +48,7 @@ CARLA server version.
 carla_first_demo/
   assets/
     sample_rgb.png
+    sample_semantic.png
     sample_trajectory.png
   outputs/
     .gitkeep
@@ -117,10 +124,16 @@ The `26.26.26.1` address above is only an example from one development machine.
 python run_demo.py --host <your-carla-host> --duration 60 --fps 10
 ```
 
+Run with semantic segmentation output:
+
+```bash
+python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --semantic
+```
+
 Short smoke run:
 
 ```bash
-python run_demo.py --host <your-carla-host> --duration 3 --fps 5 --width 640 --height 360
+python run_demo.py --host <your-carla-host> --duration 3 --fps 5 --width 640 --height 360 --semantic
 ```
 
 Each run creates a timestamped output folder:
@@ -129,6 +142,9 @@ Each run creates a timestamped output folder:
 outputs/
   run_YYYYMMDD_HHMMSS/
     rgb/
+      000000.png
+      000001.png
+    semantic/
       000000.png
       000001.png
     vehicle_state.csv
@@ -141,13 +157,14 @@ outputs/
 `vehicle_state.csv` contains one row per simulation frame:
 
 ```text
-step, frame, timestamp, image_path,
+step, frame, timestamp, rgb_path, semantic_path,
 x, y, z, roll, pitch, yaw,
 vx, vy, vz, speed_mps,
 throttle, steer, brake, hand_brake, reverse, gear
 ```
 
-The RGB camera is attached to the ego vehicle at a front windshield-like pose:
+The RGB and semantic cameras are attached to the ego vehicle at a front
+windshield-like pose:
 
 ```text
 Location: x=1.6, z=1.7
@@ -169,8 +186,8 @@ and follows it with the spectator camera.
 `run_demo.py`
 
 Main data collection script. It uses synchronous mode, spawns an ego vehicle,
-attaches a front RGB camera, saves RGB frames and vehicle states, and generates
-a trajectory plot.
+attaches a front RGB camera, optionally attaches a semantic segmentation camera,
+saves sensor frames and vehicle states, and generates a trajectory plot.
 
 ## Troubleshooting
 
@@ -200,7 +217,6 @@ only shows a spectator view and does not attach a sensor.
 
 ## Roadmap
 
-- Add semantic segmentation camera output.
 - Add LiDAR output.
 - Add fixed route generation.
 - Replace CARLA autopilot with PID or Pure Pursuit control.
