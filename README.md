@@ -15,6 +15,10 @@ Semantic segmentation camera:
 
 ![Sample semantic segmentation frame](assets/sample_semantic.png)
 
+LiDAR BEV point cloud:
+
+![Sample LiDAR BEV point cloud](assets/sample_lidar_bev.png)
+
 Trajectory plot:
 
 ![Sample trajectory plot](assets/sample_trajectory.png)
@@ -50,6 +54,7 @@ CARLA server version.
 carla_first_demo/
   assets/
     sample_rgb.png
+    sample_lidar_bev.png
     sample_semantic.png
     sample_trajectory.png
   outputs/
@@ -210,6 +215,17 @@ attaches a front RGB camera, optionally attaches a semantic segmentation camera,
 optionally attaches a LiDAR sensor, saves sensor frames and vehicle states, and
 generates a trajectory plot.
 
+`tools/render_lidar_bev.py`
+
+Utility script for rendering an ASCII PLY LiDAR frame as a static bird's-eye
+view PNG for quick inspection or README figures.
+
+Example:
+
+```bash
+python tools/render_lidar_bev.py outputs/run_YYYYMMDD_HHMMSS/lidar/000000.ply assets/sample_lidar_bev.png --limit 50
+```
+
 ## Troubleshooting
 
 `ModuleNotFoundError: No module named 'carla'`
@@ -240,6 +256,12 @@ LiDAR files are not saved
 
 Make sure `--lidar` is passed to `run_demo.py`. LiDAR point clouds are saved as
 `.ply` files in the `lidar/` output folder.
+
+LiDAR is hard to inspect in GitHub
+
+GitHub does not render `.ply` point clouds interactively in README files. Use
+`tools/render_lidar_bev.py` to create a static BEV PNG for documentation or
+quick visual checks.
 
 ## Roadmap
 
