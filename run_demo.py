@@ -25,10 +25,12 @@ def default_windows_host() -> str:
     return "127.0.0.1"
 
 
-def make_run_dir(output_root: Path) -> Path:
+def make_run_dir(output_root: Path, include_semantic: bool) -> Path:
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     run_dir = output_root / run_id
     (run_dir / "rgb").mkdir(parents=True, exist_ok=False)
+    if include_semantic:
+        (run_dir / "semantic").mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
@@ -72,6 +74,30 @@ def attach_rgb_camera(
     fov: float,
 ) -> tuple[carla.Sensor, queue.Queue]:
     camera_bp = world.get_blueprint_library().find("sensor.camera.rgb")
+    camera_bp.set_attribute("image_size_x", str(width))
+    camera_bp.set_attribute("image_size_y", str(height))
+    camera_bp.set_attribute("fov", str(fov))
+    camera_bp.set_attribute("sensor_tick", "0.0")
+
+    camera_transform = carla.Transform(
+        carla.Location(x=1.6, z=1.7),
+        carla.Rotation(pitch=-5.0),
+    )
+    camera = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+
+    image_queue: queue.Queue = queue.Queue()
+    camera.listen(image_queue.put)
+    return camera, image_queue
+
+
+def attach_semantic_camera(
+    world: carla.World,
+    vehicle: carla.Vehicle,
+    width: int,
+    height: int,
+    fov: float,
+) -> tuple[carla.Sensor, queue.Queue]:
+    camera_bp = world.get_blueprint_library().find("sensor.camera.semantic_segmentation")
     camera_bp.set_attribute("image_size_x", str(width))
     camera_bp.set_attribute("image_size_y", str(height))
     camera_bp.set_attribute("fov", str(fov))
@@ -168,6 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", default=1280, type=int)
     parser.add_argument("--height", default=720, type=int)
     parser.add_argument("--fov", default=90.0, type=float)
+    parser.add_argument("--semantic", action="store_true", help="Save semantic segmentation frames.")
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
@@ -186,7 +213,7 @@ def main() -> None:
         world = client.load_world(args.town)
 
     output_root = Path(args.output_root)
-    run_dir = make_run_dir(output_root)
+    run_dir = make_run_dir(output_root, args.semantic)
     write_config(run_dir, args, world.get_map().name)
 
     original_settings = world.get_settings()
@@ -213,6 +240,16 @@ def main() -> None:
 
         camera, image_queue = attach_rgb_camera(world, vehicle, args.width, args.height, args.fov)
         actors.append(camera)
+        semantic_queue = None
+        if args.semantic:
+            semantic_camera, semantic_queue = attach_semantic_camera(
+                world,
+                vehicle,
+                args.width,
+                args.height,
+                args.fov,
+            )
+            actors.append(semantic_camera)
 
         csv_path = run_dir / "vehicle_state.csv"
         total_frames = max(1, int(args.duration * args.fps))
@@ -227,7 +264,8 @@ def main() -> None:
                 "step",
                 "frame",
                 "timestamp",
-                "image_path",
+                "rgb_path",
+                "semantic_path",
                 "x",
                 "y",
                 "z",
@@ -251,20 +289,32 @@ def main() -> None:
             for step in range(total_frames):
                 frame = world.tick()
                 image = get_sensor_data(image_queue, frame)
+                semantic_image = None
+                if semantic_queue is not None:
+                    semantic_image = get_sensor_data(semantic_queue, frame)
                 follow_vehicle_with_spectator(world, vehicle)
 
                 transform = vehicle.get_transform()
                 velocity = vehicle.get_velocity()
                 control = vehicle.get_control()
-                image_path = run_dir / "rgb" / f"{step:06d}.png"
-                image.save_to_disk(str(image_path))
+                rgb_path = run_dir / "rgb" / f"{step:06d}.png"
+                semantic_path = ""
+                image.save_to_disk(str(rgb_path))
+                if semantic_image is not None:
+                    semantic_file = run_dir / "semantic" / f"{step:06d}.png"
+                    semantic_image.save_to_disk(
+                        str(semantic_file),
+                        carla.ColorConverter.CityScapesPalette,
+                    )
+                    semantic_path = str(semantic_file.relative_to(run_dir))
 
                 writer.writerow(
                     {
                         "step": step,
                         "frame": frame,
                         "timestamp": image.timestamp,
-                        "image_path": str(image_path.relative_to(run_dir)),
+                        "rgb_path": str(rgb_path.relative_to(run_dir)),
+                        "semantic_path": semantic_path,
                         "x": transform.location.x,
                         "y": transform.location.y,
                         "z": transform.location.z,
