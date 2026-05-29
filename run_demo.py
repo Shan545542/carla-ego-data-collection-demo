@@ -25,12 +25,14 @@ def default_windows_host() -> str:
     return "127.0.0.1"
 
 
-def make_run_dir(output_root: Path, include_semantic: bool) -> Path:
+def make_run_dir(output_root: Path, include_semantic: bool, include_lidar: bool) -> Path:
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     run_dir = output_root / run_id
     (run_dir / "rgb").mkdir(parents=True, exist_ok=False)
     if include_semantic:
         (run_dir / "semantic").mkdir(parents=True, exist_ok=False)
+    if include_lidar:
+        (run_dir / "lidar").mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
@@ -114,7 +116,35 @@ def attach_semantic_camera(
     return camera, image_queue
 
 
-def get_sensor_data(sensor_queue: queue.Queue, frame: int, timeout: float = 2.0) -> carla.Image:
+def attach_lidar(
+    world: carla.World,
+    vehicle: carla.Vehicle,
+    fps: float,
+    channels: int,
+    points_per_second: int,
+    lidar_range: float,
+) -> tuple[carla.Sensor, queue.Queue]:
+    lidar_bp = world.get_blueprint_library().find("sensor.lidar.ray_cast")
+    lidar_bp.set_attribute("channels", str(channels))
+    lidar_bp.set_attribute("points_per_second", str(points_per_second))
+    lidar_bp.set_attribute("range", str(lidar_range))
+    lidar_bp.set_attribute("rotation_frequency", str(fps))
+    lidar_bp.set_attribute("upper_fov", "10.0")
+    lidar_bp.set_attribute("lower_fov", "-30.0")
+    lidar_bp.set_attribute("sensor_tick", "0.0")
+
+    lidar_transform = carla.Transform(
+        carla.Location(x=0.0, z=2.4),
+        carla.Rotation(),
+    )
+    lidar = world.spawn_actor(lidar_bp, lidar_transform, attach_to=vehicle)
+
+    lidar_queue: queue.Queue = queue.Queue()
+    lidar.listen(lidar_queue.put)
+    return lidar, lidar_queue
+
+
+def get_sensor_data(sensor_queue: queue.Queue, frame: int, timeout: float = 2.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         remaining = max(0.01, deadline - time.time())
@@ -195,6 +225,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", default=720, type=int)
     parser.add_argument("--fov", default=90.0, type=float)
     parser.add_argument("--semantic", action="store_true", help="Save semantic segmentation frames.")
+    parser.add_argument("--lidar", action="store_true", help="Save LiDAR point clouds as PLY files.")
+    parser.add_argument("--lidar-channels", default=32, type=int)
+    parser.add_argument("--lidar-points-per-second", default=56000, type=int)
+    parser.add_argument("--lidar-range", default=50.0, type=float)
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
@@ -213,7 +247,7 @@ def main() -> None:
         world = client.load_world(args.town)
 
     output_root = Path(args.output_root)
-    run_dir = make_run_dir(output_root, args.semantic)
+    run_dir = make_run_dir(output_root, args.semantic, args.lidar)
     write_config(run_dir, args, world.get_map().name)
 
     original_settings = world.get_settings()
@@ -250,6 +284,17 @@ def main() -> None:
                 args.fov,
             )
             actors.append(semantic_camera)
+        lidar_queue = None
+        if args.lidar:
+            lidar, lidar_queue = attach_lidar(
+                world,
+                vehicle,
+                args.fps,
+                args.lidar_channels,
+                args.lidar_points_per_second,
+                args.lidar_range,
+            )
+            actors.append(lidar)
 
         csv_path = run_dir / "vehicle_state.csv"
         total_frames = max(1, int(args.duration * args.fps))
@@ -266,6 +311,7 @@ def main() -> None:
                 "timestamp",
                 "rgb_path",
                 "semantic_path",
+                "lidar_path",
                 "x",
                 "y",
                 "z",
@@ -292,6 +338,9 @@ def main() -> None:
                 semantic_image = None
                 if semantic_queue is not None:
                     semantic_image = get_sensor_data(semantic_queue, frame)
+                lidar_data = None
+                if lidar_queue is not None:
+                    lidar_data = get_sensor_data(lidar_queue, frame)
                 follow_vehicle_with_spectator(world, vehicle)
 
                 transform = vehicle.get_transform()
@@ -299,6 +348,7 @@ def main() -> None:
                 control = vehicle.get_control()
                 rgb_path = run_dir / "rgb" / f"{step:06d}.png"
                 semantic_path = ""
+                lidar_path = ""
                 image.save_to_disk(str(rgb_path))
                 if semantic_image is not None:
                     semantic_file = run_dir / "semantic" / f"{step:06d}.png"
@@ -307,6 +357,10 @@ def main() -> None:
                         carla.ColorConverter.CityScapesPalette,
                     )
                     semantic_path = str(semantic_file.relative_to(run_dir))
+                if lidar_data is not None:
+                    lidar_file = run_dir / "lidar" / f"{step:06d}.ply"
+                    lidar_data.save_to_disk(str(lidar_file))
+                    lidar_path = str(lidar_file.relative_to(run_dir))
 
                 writer.writerow(
                     {
@@ -315,6 +369,7 @@ def main() -> None:
                         "timestamp": image.timestamp,
                         "rgb_path": str(rgb_path.relative_to(run_dir)),
                         "semantic_path": semantic_path,
+                        "lidar_path": lidar_path,
                         "x": transform.location.x,
                         "y": transform.location.y,
                         "z": transform.location.z,

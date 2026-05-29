@@ -25,9 +25,11 @@ Trajectory plot:
 - Spawn one ego vehicle.
 - Attach a front RGB camera to the ego vehicle.
 - Optionally attach a semantic segmentation camera to the same pose.
+- Optionally attach a roof-mounted LiDAR sensor.
 - Run CARLA in synchronous mode.
 - Save RGB frames to disk.
 - Save semantic segmentation frames with the CityScapes color palette.
+- Save LiDAR point clouds as PLY files.
 - Save ego vehicle pose, velocity, and control states to CSV.
 - Generate a trajectory plot after each run.
 - Restore world settings and clean up actors after the script exits.
@@ -130,10 +132,16 @@ Run with semantic segmentation output:
 python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --semantic
 ```
 
+Run with RGB, semantic segmentation, and LiDAR output:
+
+```bash
+python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --semantic --lidar
+```
+
 Short smoke run:
 
 ```bash
-python run_demo.py --host <your-carla-host> --duration 3 --fps 5 --width 640 --height 360 --semantic
+python run_demo.py --host <your-carla-host> --duration 3 --fps 5 --width 640 --height 360 --semantic --lidar
 ```
 
 Each run creates a timestamped output folder:
@@ -147,6 +155,9 @@ outputs/
     semantic/
       000000.png
       000001.png
+    lidar/
+      000000.ply
+      000001.ply
     vehicle_state.csv
     trajectory.png
     config.json
@@ -157,7 +168,7 @@ outputs/
 `vehicle_state.csv` contains one row per simulation frame:
 
 ```text
-step, frame, timestamp, rgb_path, semantic_path,
+step, frame, timestamp, rgb_path, semantic_path, lidar_path,
 x, y, z, roll, pitch, yaw,
 vx, vy, vz, speed_mps,
 throttle, steer, brake, hand_brake, reverse, gear
@@ -169,6 +180,15 @@ windshield-like pose:
 ```text
 Location: x=1.6, z=1.7
 Rotation: pitch=-5 deg
+```
+
+The LiDAR is mounted near the roof center:
+
+```text
+Location: x=0.0, z=2.4
+Default channels: 32
+Default points per second: 56000
+Default range: 50 m
 ```
 
 ## Scripts
@@ -187,7 +207,8 @@ and follows it with the spectator camera.
 
 Main data collection script. It uses synchronous mode, spawns an ego vehicle,
 attaches a front RGB camera, optionally attaches a semantic segmentation camera,
-saves sensor frames and vehicle states, and generates a trajectory plot.
+optionally attaches a LiDAR sensor, saves sensor frames and vehicle states, and
+generates a trajectory plot.
 
 ## Troubleshooting
 
@@ -215,9 +236,13 @@ Images are not saved
 Make sure `run_demo.py` is used instead of `spawn_ego_demo.py`. The legacy demo
 only shows a spectator view and does not attach a sensor.
 
+LiDAR files are not saved
+
+Make sure `--lidar` is passed to `run_demo.py`. LiDAR point clouds are saved as
+`.ply` files in the `lidar/` output folder.
+
 ## Roadmap
 
-- Add LiDAR output.
 - Add fixed route generation.
 - Replace CARLA autopilot with PID or Pure Pursuit control.
 - Add trajectory tracking error metrics.
