@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import csv
 import json
 import math
@@ -11,6 +12,10 @@ from datetime import datetime
 from pathlib import Path
 
 import carla
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
 def default_windows_host() -> str:
@@ -167,6 +172,207 @@ def speed_mps(vehicle: carla.Vehicle) -> float:
     return math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
 
 
+def build_route(
+    world_map: carla.Map,
+    start_location: carla.Location,
+    route_length: float,
+    spacing: float,
+) -> list[carla.Waypoint]:
+    start_waypoint = world_map.get_waypoint(
+        start_location,
+        project_to_road=True,
+        lane_type=carla.LaneType.Driving,
+    )
+    route = [start_waypoint]
+    current = start_waypoint
+    distance = 0.0
+
+    while distance < route_length:
+        next_waypoints = current.next(spacing)
+        if not next_waypoints:
+            break
+        current = next_waypoints[0]
+        route.append(current)
+        distance += spacing
+
+    if len(route) < 2:
+        raise RuntimeError("Could not build a route from the current spawn point.")
+    return route
+
+
+def write_route_csv(route: list[carla.Waypoint], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["index", "x", "y", "z", "yaw"])
+        writer.writeheader()
+        for index, waypoint in enumerate(route):
+            transform = waypoint.transform
+            writer.writerow(
+                {
+                    "index": index,
+                    "x": transform.location.x,
+                    "y": transform.location.y,
+                    "z": transform.location.z,
+                    "yaw": transform.rotation.yaw,
+                }
+            )
+
+
+def nearest_route_index(location: carla.Location, route: list[carla.Waypoint]) -> int:
+    best_index = 0
+    best_distance_sq = float("inf")
+    for index, waypoint in enumerate(route):
+        route_location = waypoint.transform.location
+        dx = location.x - route_location.x
+        dy = location.y - route_location.y
+        distance_sq = dx * dx + dy * dy
+        if distance_sq < best_distance_sq:
+            best_index = index
+            best_distance_sq = distance_sq
+    return best_index
+
+
+def find_lookahead_index(
+    transform: carla.Transform,
+    route: list[carla.Waypoint],
+    nearest_index: int,
+    lookahead_distance: float,
+) -> int:
+    vehicle_location = transform.location
+    yaw = math.radians(transform.rotation.yaw)
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+
+    for index in range(nearest_index, len(route)):
+        target_location = route[index].transform.location
+        dx = target_location.x - vehicle_location.x
+        dy = target_location.y - vehicle_location.y
+        local_x = cos_yaw * dx + sin_yaw * dy
+        distance = math.sqrt(dx * dx + dy * dy)
+        if local_x > 0.0 and distance >= lookahead_distance:
+            return index
+    return len(route) - 1
+
+
+def signed_cross_track_error(location: carla.Location, route: list[carla.Waypoint], index: int) -> float:
+    segment_start = route[min(index, len(route) - 2)].transform.location
+    segment_end = route[min(index + 1, len(route) - 1)].transform.location
+
+    vx = segment_end.x - segment_start.x
+    vy = segment_end.y - segment_start.y
+    wx = location.x - segment_start.x
+    wy = location.y - segment_start.y
+    segment_norm = math.sqrt(vx * vx + vy * vy)
+    if segment_norm < 1e-6:
+        return 0.0
+    return (vx * wy - vy * wx) / segment_norm
+
+
+def pure_pursuit_steer(
+    transform: carla.Transform,
+    target_location: carla.Location,
+    lookahead_distance: float,
+    wheelbase: float,
+    max_steer_angle_deg: float,
+) -> tuple[float, float]:
+    yaw = math.radians(transform.rotation.yaw)
+    dx = target_location.x - transform.location.x
+    dy = target_location.y - transform.location.y
+    local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
+
+    lookahead = max(lookahead_distance, 1e-3)
+    curvature = 2.0 * local_y / (lookahead * lookahead)
+    steering_angle_rad = math.atan(wheelbase * curvature)
+    max_steer_rad = math.radians(max_steer_angle_deg)
+    steering_angle_rad = clamp(steering_angle_rad, -max_steer_rad, max_steer_rad)
+    steer_cmd = clamp(steering_angle_rad / max_steer_rad, -1.0, 1.0)
+    return steer_cmd, math.degrees(steering_angle_rad)
+
+
+class SpeedPID:
+    def __init__(
+        self,
+        kp: float,
+        ki: float,
+        kd: float,
+        max_throttle: float,
+        max_brake: float,
+        integral_limit: float,
+    ) -> None:
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.max_throttle = max_throttle
+        self.max_brake = max_brake
+        self.integral_limit = integral_limit
+        self.integral = 0.0
+        self.previous_error = 0.0
+
+    def step(self, target_speed: float, current_speed: float, dt: float) -> tuple[float, float, float]:
+        error = target_speed - current_speed
+        self.integral = clamp(
+            self.integral + error * dt,
+            -self.integral_limit,
+            self.integral_limit,
+        )
+        derivative = (error - self.previous_error) / dt if dt > 0 else 0.0
+        self.previous_error = error
+
+        command = self.kp * error + self.ki * self.integral + self.kd * derivative
+        if command >= 0.0:
+            throttle = clamp(command, 0.0, self.max_throttle)
+            brake = 0.0
+        else:
+            throttle = 0.0
+            brake = clamp(-command, 0.0, self.max_brake)
+        return throttle, brake, error
+
+
+def compute_route_progress(nearest_index: int, route: list[carla.Waypoint]) -> float:
+    if len(route) <= 1:
+        return 0.0
+    return 100.0 * nearest_index / (len(route) - 1)
+
+
+def plot_route_tracking(
+    route: list[carla.Waypoint],
+    tracking_csv_path: Path,
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    route_x = [waypoint.transform.location.x for waypoint in route]
+    route_y = [waypoint.transform.location.y for waypoint in route]
+    vehicle_x: list[float] = []
+    vehicle_y: list[float] = []
+    cross_track_errors: list[float] = []
+
+    with tracking_csv_path.open("r", encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            vehicle_x.append(float(row["x"]))
+            vehicle_y.append(float(row["y"]))
+            cross_track_errors.append(abs(float(row["cross_track_error_m"])))
+
+    if not vehicle_x:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
+    ax.plot(route_x, route_y, "--", linewidth=1.5, label="reference route")
+    scatter = ax.scatter(vehicle_x, vehicle_y, c=cross_track_errors, s=10, cmap="magma", label="ego path")
+    ax.scatter(vehicle_x[0], vehicle_y[0], marker="o", s=70, label="start")
+    ax.scatter(vehicle_x[-1], vehicle_y[-1], marker="x", s=80, label="end")
+    ax.set_title("Route Tracking")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.axis("equal")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.colorbar(scatter, ax=ax, label="abs cross-track error (m)")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def write_config(run_dir: Path, args: argparse.Namespace, map_name: str) -> None:
     config = vars(args).copy()
     config["map"] = map_name
@@ -229,6 +435,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lidar-channels", default=32, type=int)
     parser.add_argument("--lidar-points-per-second", default=56000, type=int)
     parser.add_argument("--lidar-range", default=50.0, type=float)
+    parser.add_argument("--control-mode", default="autopilot", choices=["autopilot", "pure_pursuit"])
+    parser.add_argument("--route-length", default=120.0, type=float, help="Reference route length in meters.")
+    parser.add_argument("--route-spacing", default=2.0, type=float, help="Route waypoint spacing in meters.")
+    parser.add_argument("--lookahead-distance", default=8.0, type=float, help="Pure Pursuit lookahead distance.")
+    parser.add_argument("--wheelbase", default=2.8, type=float, help="Bicycle-model wheelbase in meters.")
+    parser.add_argument("--target-speed", default=8.0, type=float, help="Target speed in m/s.")
+    parser.add_argument("--max-speed", default=12.0, type=float, help="Safety cap for target speed in m/s.")
+    parser.add_argument("--max-steer-angle", default=35.0, type=float, help="Physical steering limit in degrees.")
+    parser.add_argument("--max-throttle", default=0.6, type=float)
+    parser.add_argument("--max-brake", default=0.8, type=float)
+    parser.add_argument("--speed-kp", default=0.35, type=float)
+    parser.add_argument("--speed-ki", default=0.05, type=float)
+    parser.add_argument("--speed-kd", default=0.02, type=float)
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--seed", default=42, type=int)
     return parser.parse_args()
@@ -270,7 +489,29 @@ def main() -> None:
         vehicle_bp = choose_vehicle_blueprint(world, args.vehicle_filter)
         vehicle = spawn_vehicle(world, vehicle_bp, args.spawn_index)
         actors.append(vehicle)
-        vehicle.set_autopilot(True, traffic_manager.get_port())
+        route = None
+        target_speed = min(args.target_speed, args.max_speed)
+        speed_controller = SpeedPID(
+            args.speed_kp,
+            args.speed_ki,
+            args.speed_kd,
+            args.max_throttle,
+            args.max_brake,
+            integral_limit=10.0,
+        )
+
+        if args.control_mode == "autopilot":
+            vehicle.set_autopilot(True, traffic_manager.get_port())
+        else:
+            vehicle.set_autopilot(False)
+            world.tick()
+            route = build_route(
+                world.get_map(),
+                vehicle.get_transform().location,
+                args.route_length,
+                args.route_spacing,
+            )
+            write_route_csv(route, run_dir / "route_waypoints.csv")
 
         camera, image_queue = attach_rgb_camera(world, vehicle, args.width, args.height, args.fov)
         actors.append(camera)
@@ -297,14 +538,20 @@ def main() -> None:
             actors.append(lidar)
 
         csv_path = run_dir / "vehicle_state.csv"
+        tracking_csv_path = run_dir / "tracking_metrics.csv" if route is not None else None
         total_frames = max(1, int(args.duration * args.fps))
 
         print(f"Output: {run_dir}")
         print(f"Map: {world.get_map().name}")
         print(f"Ego vehicle: {vehicle.type_id} (actor id {vehicle.id})")
+        print(f"Control mode: {args.control_mode}")
+        if route is not None:
+            print(f"Route waypoints: {len(route)}")
+            print(f"Target speed: {target_speed:g} m/s (cap: {args.max_speed:g} m/s)")
         print(f"Collecting {total_frames} frames at {args.fps:g} FPS ...")
 
-        with csv_path.open("w", encoding="utf-8", newline="") as file:
+        with contextlib.ExitStack() as stack:
+            file = stack.enter_context(csv_path.open("w", encoding="utf-8", newline=""))
             fieldnames = [
                 "step",
                 "frame",
@@ -332,7 +579,71 @@ def main() -> None:
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writeheader()
 
+            tracking_writer = None
+            if tracking_csv_path is not None:
+                tracking_file = stack.enter_context(tracking_csv_path.open("w", encoding="utf-8", newline=""))
+                tracking_writer = csv.DictWriter(
+                    tracking_file,
+                    fieldnames=[
+                        "step",
+                        "frame",
+                        "timestamp",
+                        "x",
+                        "y",
+                        "nearest_index",
+                        "target_index",
+                        "route_progress_pct",
+                        "cross_track_error_m",
+                        "target_speed_mps",
+                        "current_speed_mps",
+                        "speed_error_mps",
+                        "steering_angle_deg",
+                        "steer_cmd",
+                        "throttle_cmd",
+                        "brake_cmd",
+                    ],
+                )
+                tracking_writer.writeheader()
+
             for step in range(total_frames):
+                control_target_index = -1
+                steering_angle_deg = 0.0
+                if route is not None:
+                    pre_tick_transform = vehicle.get_transform()
+                    current_speed = speed_mps(vehicle)
+                    nearest_index = nearest_route_index(pre_tick_transform.location, route)
+                    control_target_index = find_lookahead_index(
+                        pre_tick_transform,
+                        route,
+                        nearest_index,
+                        args.lookahead_distance,
+                    )
+                    target_location = route[control_target_index].transform.location
+                    steer_cmd, steering_angle_deg = pure_pursuit_steer(
+                        pre_tick_transform,
+                        target_location,
+                        args.lookahead_distance,
+                        args.wheelbase,
+                        args.max_steer_angle,
+                    )
+                    throttle_cmd, brake_cmd, _speed_error = speed_controller.step(
+                        target_speed,
+                        current_speed,
+                        fixed_delta_seconds,
+                    )
+                    if nearest_index >= len(route) - 2:
+                        throttle_cmd = 0.0
+                        brake_cmd = args.max_brake
+                    vehicle.apply_control(
+                        carla.VehicleControl(
+                            throttle=throttle_cmd,
+                            steer=steer_cmd,
+                            brake=brake_cmd,
+                            hand_brake=False,
+                            reverse=False,
+                        )
+                    )
+
                 frame = world.tick()
                 image = get_sensor_data(image_queue, frame)
                 semantic_image = None
@@ -346,6 +657,7 @@ def main() -> None:
                 transform = vehicle.get_transform()
                 velocity = vehicle.get_velocity()
                 control = vehicle.get_control()
+                current_speed = speed_mps(vehicle)
                 rgb_path = run_dir / "rgb" / f"{step:06d}.png"
                 semantic_path = ""
                 lidar_path = ""
@@ -379,7 +691,7 @@ def main() -> None:
                         "vx": velocity.x,
                         "vy": velocity.y,
                         "vz": velocity.z,
-                        "speed_mps": speed_mps(vehicle),
+                        "speed_mps": current_speed,
                         "throttle": control.throttle,
                         "steer": control.steer,
                         "brake": control.brake,
@@ -389,14 +701,49 @@ def main() -> None:
                     }
                 )
 
+                if route is not None and tracking_writer is not None:
+                    nearest_index = nearest_route_index(transform.location, route)
+                    target_index = find_lookahead_index(
+                        transform,
+                        route,
+                        nearest_index,
+                        args.lookahead_distance,
+                    )
+                    cross_track_error = signed_cross_track_error(transform.location, route, nearest_index)
+                    tracking_writer.writerow(
+                        {
+                            "step": step,
+                            "frame": frame,
+                            "timestamp": image.timestamp,
+                            "x": transform.location.x,
+                            "y": transform.location.y,
+                            "nearest_index": nearest_index,
+                            "target_index": target_index,
+                            "route_progress_pct": compute_route_progress(nearest_index, route),
+                            "cross_track_error_m": cross_track_error,
+                            "target_speed_mps": target_speed,
+                            "current_speed_mps": current_speed,
+                            "speed_error_mps": target_speed - current_speed,
+                            "steering_angle_deg": steering_angle_deg,
+                            "steer_cmd": control.steer,
+                            "throttle_cmd": control.throttle,
+                            "brake_cmd": control.brake,
+                        }
+                    )
+
                 if (step + 1) % max(1, int(args.fps)) == 0 or step == total_frames - 1:
                     print(f"Saved {step + 1}/{total_frames} frames")
 
         plot_trajectory(csv_path, run_dir / "trajectory.png")
+        if route is not None and tracking_csv_path is not None:
+            plot_route_tracking(route, tracking_csv_path, run_dir / "route_tracking.png")
         print("Done.")
         print(f"RGB images: {run_dir / 'rgb'}")
         print(f"Vehicle states: {csv_path}")
         print(f"Trajectory plot: {run_dir / 'trajectory.png'}")
+        if tracking_csv_path is not None:
+            print(f"Tracking metrics: {tracking_csv_path}")
+            print(f"Route tracking plot: {run_dir / 'route_tracking.png'}")
 
     finally:
         traffic_manager.set_synchronous_mode(False)
