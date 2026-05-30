@@ -23,6 +23,10 @@ Trajectory plot:
 
 ![Sample trajectory plot](assets/sample_trajectory.png)
 
+Route tracking plot:
+
+![Sample route tracking plot](assets/sample_route_tracking.png)
+
 ## Features
 
 - Connect to a CARLA server from Python.
@@ -35,6 +39,9 @@ Trajectory plot:
 - Save semantic segmentation frames with the CityScapes color palette.
 - Save LiDAR point clouds as PLY files.
 - Save ego vehicle pose, velocity, and control states to CSV.
+- Optionally follow a fixed route with Pure Pursuit lateral control.
+- Optionally use PID speed control with throttle, brake, speed, and steering limits.
+- Save route tracking metrics and a route tracking plot.
 - Generate a trajectory plot after each run.
 - Restore world settings and clean up actors after the script exits.
 
@@ -56,6 +63,7 @@ carla_first_demo/
     sample_rgb.png
     sample_lidar_bev.png
     sample_semantic.png
+    sample_route_tracking.png
     sample_trajectory.png
   outputs/
     .gitkeep
@@ -143,6 +151,12 @@ Run with RGB, semantic segmentation, and LiDAR output:
 python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --semantic --lidar
 ```
 
+Run with fixed-route Pure Pursuit + PID control:
+
+```bash
+python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --control-mode pure_pursuit --target-speed 6 --max-speed 8 --max-steer-angle 30
+```
+
 Short smoke run:
 
 ```bash
@@ -164,7 +178,10 @@ outputs/
       000000.ply
       000001.ply
     vehicle_state.csv
+    route_waypoints.csv
+    tracking_metrics.csv
     trajectory.png
+    route_tracking.png
     config.json
 ```
 
@@ -177,6 +194,16 @@ step, frame, timestamp, rgb_path, semantic_path, lidar_path,
 x, y, z, roll, pitch, yaw,
 vx, vy, vz, speed_mps,
 throttle, steer, brake, hand_brake, reverse, gear
+```
+
+`tracking_metrics.csv` is created when `--control-mode pure_pursuit` is used:
+
+```text
+step, frame, timestamp, x, y,
+nearest_index, target_index, route_progress_pct,
+cross_track_error_m,
+target_speed_mps, current_speed_mps, speed_error_mps,
+steering_angle_deg, steer_cmd, throttle_cmd, brake_cmd
 ```
 
 The RGB and semantic cameras are attached to the ego vehicle at a front
@@ -196,6 +223,16 @@ Default points per second: 56000
 Default range: 50 m
 ```
 
+The Pure Pursuit controller applies explicit physical limits:
+
+```text
+steer_cmd: [-1, 1]
+max steering angle: configurable, default 35 deg
+target speed: capped by --max-speed
+throttle: [0, --max-throttle]
+brake: [0, --max-brake]
+```
+
 ## Scripts
 
 `smoke_test.py`
@@ -213,7 +250,7 @@ and follows it with the spectator camera.
 Main data collection script. It uses synchronous mode, spawns an ego vehicle,
 attaches a front RGB camera, optionally attaches a semantic segmentation camera,
 optionally attaches a LiDAR sensor, saves sensor frames and vehicle states, and
-generates a trajectory plot.
+generates trajectory and route tracking plots.
 
 `tools/render_lidar_bev.py`
 
@@ -263,12 +300,17 @@ GitHub does not render `.ply` point clouds interactively in README files. Use
 `tools/render_lidar_bev.py` to create a static BEV PNG for documentation or
 quick visual checks.
 
+Vehicle does not follow the route
+
+Use `--control-mode pure_pursuit` to enable the custom controller. The default
+mode is `autopilot`, which uses CARLA's Traffic Manager instead of the fixed
+route controller.
+
 ## Roadmap
 
-- Add fixed route generation.
-- Replace CARLA autopilot with PID or Pure Pursuit control.
-- Add trajectory tracking error metrics.
 - Add a small result report generator.
+- Add route selection presets.
+- Add controller comparison between autopilot, Pure Pursuit, and future MPC.
 
 ## License
 
