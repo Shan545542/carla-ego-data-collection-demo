@@ -1,21 +1,54 @@
-# CARLA 0.9.15 Ego Vehicle Data Collection Demo
+# CARLA 0.9.15 Ego Data Collection and Route Following Demo
 
-A compact CARLA 0.9.15 demo for collecting front RGB images, ego vehicle
-states, and a trajectory plot from a Python client. The project is designed for
-the common setup where CARLA runs on Windows and the Python client runs in WSL,
-but the host can be configured for other networking setups.
+A compact CARLA 0.9.15 project for ego vehicle simulation, multi-sensor data
+collection, and fixed-route control. It demonstrates a practical Windows CARLA
+server + WSL Python client workflow, including RGB camera output, semantic
+segmentation, LiDAR point clouds, vehicle-state logging, Pure Pursuit lateral
+control, PID speed control, and route-tracking visualization.
+
+This is intended as a small but complete learning project for autonomous driving
+simulation. The goal is not to provide a production autonomous driving stack,
+but to make the full loop from simulation setup to sensor data, control commands,
+metrics, and plots easy to inspect and reproduce.
+
+## Project Overview
+
+The demo follows a client-server architecture:
+
+```text
+Windows CARLA Server
+        |
+        v
+WSL Python Client
+        |
+        v
+Ego Vehicle in CARLA
+        |
+        +--> RGB camera frames
+        +--> Semantic segmentation frames
+        +--> LiDAR point clouds
+        +--> Vehicle state CSV
+        +--> Pure Pursuit + PID control
+        |
+        v
+Trajectory plot + route tracking metrics
+```
+
+The main script, `run_demo.py`, can be used either as a simple data collection
+tool with CARLA autopilot or as a basic route-following controller with explicit
+speed, steering, throttle, and brake limits.
 
 ## Demo Output
 
-Front RGB camera:
+Front RGB camera output:
 
 ![Sample RGB camera frame](assets/sample_rgb.png)
 
-Semantic segmentation camera:
+Semantic segmentation output:
 
 ![Sample semantic segmentation frame](assets/sample_semantic.png)
 
-LiDAR BEV point cloud:
+LiDAR bird's-eye-view point cloud:
 
 ![Sample LiDAR BEV point cloud](assets/sample_lidar_bev.png)
 
@@ -23,9 +56,22 @@ Trajectory plot:
 
 ![Sample trajectory plot](assets/sample_trajectory.png)
 
-Route tracking plot:
+Route tracking plot for fixed-route control:
 
 ![Sample route tracking plot](assets/sample_route_tracking.png)
+
+## What This Project Demonstrates
+
+- CARLA Python client connection and simulator health checking.
+- Ego vehicle spawning and cleanup.
+- Synchronous simulation for deterministic frame-by-frame data collection.
+- RGB, semantic segmentation, and LiDAR sensor attachment.
+- Sensor data synchronization through Python queues.
+- Vehicle pose, speed, and control-state logging.
+- Fixed-route generation from CARLA waypoints.
+- Pure Pursuit lateral control with steering-angle limits.
+- PID speed control with target-speed, throttle, and brake limits.
+- Route-tracking metric logging and visualization.
 
 ## Features
 
@@ -44,6 +90,35 @@ Route tracking plot:
 - Save route tracking metrics and a route tracking plot.
 - Generate a trajectory plot after each run.
 - Restore world settings and clean up actors after the script exits.
+
+## Example Experiment
+
+A typical route-following run uses the custom controller:
+
+```bash
+python run_demo.py \
+  --host <your-carla-host> \
+  --duration 60 \
+  --fps 10 \
+  --control-mode pure_pursuit \
+  --target-speed 6 \
+  --max-speed 8 \
+  --max-steer-angle 30
+```
+
+The output includes:
+
+```text
+vehicle_state.csv       ego pose, velocity, and applied control
+route_waypoints.csv     generated fixed route
+tracking_metrics.csv    cross-track error, speed error, steering, throttle, brake
+trajectory.png          ego vehicle trajectory
+route_tracking.png      route versus actual driven path
+config.json             command-line and experiment configuration
+```
+
+This makes the demo suitable for checking both whether the code runs and whether
+the vehicle follows the intended route in a physically reasonable way.
 
 ## Tested Environment
 
@@ -74,6 +149,8 @@ carla_first_demo/
   run_demo.py
   smoke_test.py
   spawn_ego_demo.py
+  tools/
+    render_lidar_bev.py
 ```
 
 ## Quick Start
@@ -154,7 +231,14 @@ python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --semantic --
 Run with fixed-route Pure Pursuit + PID control:
 
 ```bash
-python run_demo.py --host <your-carla-host> --duration 60 --fps 10 --control-mode pure_pursuit --target-speed 6 --max-speed 8 --max-steer-angle 30
+python run_demo.py \
+  --host <your-carla-host> \
+  --duration 60 \
+  --fps 10 \
+  --control-mode pure_pursuit \
+  --target-speed 6 \
+  --max-speed 8 \
+  --max-steer-angle 30
 ```
 
 Short smoke run:
@@ -233,6 +317,26 @@ throttle: [0, --max-throttle]
 brake: [0, --max-brake]
 ```
 
+## Learning Notes
+
+This project is designed around a staged learning path:
+
+1. `smoke_test.py`: verify the Python client can connect to CARLA.
+2. `spawn_ego_demo.py`: spawn one ego vehicle and observe CARLA autopilot.
+3. `run_demo.py --semantic --lidar`: collect synchronized multi-sensor data.
+4. `run_demo.py --control-mode pure_pursuit`: run a custom route-following
+   baseline and evaluate tracking errors.
+
+Key concepts covered by the code:
+
+- CARLA client-server workflow.
+- Python command-line interfaces with `argparse`.
+- Simulation timing and synchronous mode.
+- Sensor callbacks and queue-based frame collection.
+- Basic vehicle kinematics concepts such as speed, yaw, cross-track error, and
+  steering angle.
+- Controller parameter tuning through repeated simulation.
+
 ## Scripts
 
 `smoke_test.py`
@@ -306,11 +410,26 @@ Use `--control-mode pure_pursuit` to enable the custom controller. The default
 mode is `autopilot`, which uses CARLA's Traffic Manager instead of the fixed
 route controller.
 
+## Current Limitations
+
+- The fixed route is generated from CARLA map waypoints, not from a full global
+  planner.
+- The controller is a baseline Pure Pursuit + PID implementation, not MPC or an
+  optimization-based controller.
+- RGB, semantic, and LiDAR data are collected and saved, but they are not yet
+  used for closed-loop perception or decision making.
+- The demo currently focuses on one ego vehicle instead of dense traffic
+  scenarios.
+- The sample figures are static README assets; full experiment outputs are saved
+  under `outputs/` and are ignored by Git.
+
 ## Roadmap
 
 - Add a small result report generator.
 - Add route selection presets.
 - Add controller comparison between autopilot, Pure Pursuit, and future MPC.
+- Add a short project brief for sharing the project with lab members or
+  collaborators.
 
 ## License
 
